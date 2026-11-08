@@ -66,7 +66,59 @@ function save(){normalize();stored.lastSaved=new Date().toISOString();try{localS
 openDB().then(d=>{db=d;if(!db)return;try{const tx=db.transaction('data','readonly');const req=tx.objectStore('data').get('progress');req.onsuccess=()=>{const copy=req.result;if(copy&&(!stored.lastSaved||Date.parse(copy.lastSaved||0)>Date.parse(stored.lastSaved||0))){stored=Object.assign(stored,copy);normalize();try{localStorage.setItem(storageKey,JSON.stringify(stored))}catch(e){}render()}}}catch(e){}});
 
 const escapeHtml=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function speak(s,element){if(!('speechSynthesis' in window)){alert('На этом устройстве озвучивание недоступно.');return}speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(s);u.lang='es-ES';u.rate=.78;const voices=speechSynthesis.getVoices();const v=voices.find(v=>v.lang.toLowerCase()==='es-es')||voices.find(v=>v.lang.toLowerCase().startsWith('es'));if(v)u.voice=v;speechSynthesis.speak(u)}
+// Speech playback: avoid cancel/speak in the same tick (Safari can silently drop it).
+let speechToken=0, activeUtterance=null, speechTimer=null, speechQueue=[];
+function speechStatus(message,problem=false){
+  let area=document.getElementById('audioStatus');
+  if(!area){area=document.createElement('div');area.id='audioStatus';area.setAttribute('role','status');
+    area.style.cssText='position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));z-index:9999;padding:12px 38px 12px 14px;border-radius:12px;box-shadow:0 4px 20px #0002;font:14px system-ui;max-width:600px;margin:auto;display:none';
+    document.body.appendChild(area);
+  }
+  area.style.background=problem?'#fff1e7':'#e6f5ea';area.style.color='#26332a';area.textContent=message;
+  area.style.display='block';clearTimeout(speechTimer);
+  speechTimer=setTimeout(()=>{area.style.display='none'},problem?8500:2500);
+}
+function spanishVoice(){
+  const voices=window.speechSynthesis.getVoices()||[];
+  return voices.find(v=>/^es[-_]ES$/i.test(v.lang))||voices.find(v=>/^es\b/i.test(v.lang))||null;
+}
+function playNextSpeech(token){
+  if(token!==speechToken||!speechQueue.length)return;
+  const phrase=speechQueue.shift();
+  const u=new SpeechSynthesisUtterance(phrase);
+  u.lang='es-ES';u.rate=.85;u.pitch=1;u.volume=1;
+  const v=spanishVoice();if(v)u.voice=v;
+  activeUtterance=u; // strong reference for iOS Safari
+  let started=false;
+  u.onstart=()=>{started=true;speechStatus('🔊 Воспроизведение: '+phrase)};
+  u.onerror=e=>{
+    if(token!==speechToken)return;
+    const err=e.error||'неизвестная ошибка';
+    if(err==='interrupted'||err==='canceled')return;
+    speechQueue=[];
+    speechStatus('Не удалось воспроизвести звук ('+err+'). Проверьте громкость и голос «Испанский» в настройках iPhone.',true);
+  };
+  u.onend=()=>{if(token!==speechToken)return;activeUtterance=null;if(speechQueue.length)playNextSpeech(token)};
+  try{window.speechSynthesis.speak(u);window.speechSynthesis.resume();}
+  catch(err){speechQueue=[];speechStatus('Ошибка озвучивания: '+err.message,true);return}
+  setTimeout(()=>{
+    if(token!==speechToken||started)return;
+    if(!window.speechSynthesis.speaking&&!window.speechSynthesis.pending){
+      speechStatus('Safari не запустил озвучивание. Проверьте установленный испанский голос в Настройки → Универсальный доступ → Устный контент → Голоса.',true);
+    }
+  },1800);
+}
+function speak(s,element){
+  if(!('speechSynthesis' in window)||!('SpeechSynthesisUtterance' in window)){
+    speechStatus('Этот браузер не поддерживает системное озвучивание. Откройте сайт в Safari.',true);return;
+  }
+  const synth=window.speechSynthesis;
+  const alreadyBusy=synth.speaking||synth.pending;
+  const token=++speechToken;
+  speechQueue=[String(s)];activeUtterance=null;
+  if(alreadyBusy){synth.cancel();setTimeout(()=>playNextSpeech(token),100)}
+  else playNextSpeech(token); // direct button gesture on first playback
+}
 function speakButton(s){return `<button class="speak" data-say="${escapeHtml(s)}" aria-label="Прослушать ${escapeHtml(s)}">▶ Слушать</button>`}
 function setTab(t){tab=t;if(t!=='backup'&&t!=='start'){stored.last={tab:t,category};save()}render();window.scrollTo({top:0,behavior:'smooth'})}
 function complete(id){if(!stored.done.includes(id)){stored.done.push(id);save()}render()}
@@ -124,9 +176,19 @@ function practice(){const q=practiceQuestions[practiceIndex];return `<section cl
 function backup(){let time=stored.lastSaved?new Date(stored.lastSaved).toLocaleString('ru-RU'):'ещё нет';return `<section class="panel"><p class="kicker">Сохранение и перенос</p><h2>Твой прогресс</h2><p class="desc">Автоматически сохраняем в localStorage и в базу IndexedDB этого браузера. Это два местных хранилища в одном браузере, <b>не</b> облачная копия и <b>не</b> защита от полного удаления данных Safari.</p><div class="extra-grid"><div class="micro"><b>${stored.done.length+stored.grammarDone.length+stored.dialogueDone.length}</b><p>Освоенных разделов</p></div><div class="micro"><b>${stored.favorites.length}</b><p>Избранных фраз</p></div><div class="micro"><b>${stored.stats.answered||0}</b><p>Ответов в тренажёре</p></div></div><p class="mini">Последнее сохранение: ${escapeHtml(time)}</p><h3>Резервная копия на iPhone</h3><p class="desc">Нажмите «Сохранить копию». На iPhone можно выбрать «Сохранить в Файлы» → iCloud Drive или «На iPhone». Копия сохраняется <b>по вашему действию</b>. Если вы откроете приложение с другого адреса или браузера, выберите «Восстановить из файла».</p><div class="backup-actions"><button class="primary" data-export="1">↗ Сохранить копию</button><button class="secondary" data-import="1">↙ Восстановить из файла</button></div><input class="sr-only" id="backupInput" type="file" accept="application/json,.json"><div id="backupMessage" class="bar-message" role="status">${escapeHtml(notification)}</div><div class="info" style="margin-top:18px">📱 Для надёжного продолжения на iPhone открывайте приложение <b>в одном и том же браузере и по одному и тому же адресу</b>. HTML-файл в «Файлах», открытый через предпросмотр, может использовать отдельное временное хранилище. Для полноценного режима «На экран Домой» приложению нужен HTTPS-адрес (PWA); автономный HTML этого не гарантирует.</div><button class="secondary" data-resume="1" style="margin-top:15px">↩ Вернуться к последнему уроку</button></section>`}
 function downloadBackup(){const payload={app:'espanol-a0',version:2,exportedAt:new Date().toISOString(),progress:stored};const file=new File([JSON.stringify(payload,null,2)],'espanol-a0-progress.json',{type:'application/json'});if(navigator.share&&navigator.canShare&&navigator.canShare({files:[file]})){navigator.share({files:[file],title:'Резервная копия Español A0'}).then(()=>{notification='Открыто меню сохранения. Выберите «Сохранить в Файлы».';render()}).catch(()=>{});return}const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='espanol-a0-progress.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);notification='Копия подготовлена. Сохраните файл в надёжном месте.';render()}
 async function importBackup(file){try{if(!file||file.size>3e6)throw Error('Файл слишком большой или не выбран');const data=JSON.parse(await file.text());if(data.app!=='espanol-a0'||!data.progress||!Array.isArray(data.progress.done))throw Error('Это не файл прогресса Español A0');if(!confirm('Заменить текущий прогресс данными из этого файла?'))return;stored=data.progress;normalize();save();notification='✓ Прогресс успешно восстановлен.';render()}catch(e){notification='Не удалось загрузить копию: '+e.message;render()}}
-function speakSequence(lines){if(!('speechSynthesis' in window))return; speechSynthesis.cancel();for(const line of lines){const u=new SpeechSynthesisUtterance(line[1]);u.lang='es-ES';u.rate=.74;const voices=speechSynthesis.getVoices();const v=voices.find(v=>v.lang.toLowerCase()==='es-es')||voices.find(v=>v.lang.toLowerCase().startsWith('es'));if(v)u.voice=v;speechSynthesis.speak(u)}}
+function speakSequence(lines){
+  if(!('speechSynthesis' in window)||!('SpeechSynthesisUtterance' in window)){
+    speechStatus('Озвучивание не поддерживается в этом браузере.',true);return;
+  }
+  const synth=window.speechSynthesis;
+  const busy=synth.speaking||synth.pending;
+  const token=++speechToken;
+  speechQueue=lines.map(line=>String(line[1]));activeUtterance=null;
+  if(busy){synth.cancel();setTimeout(()=>playNextSpeech(token),100)}
+  else playNextSpeech(token);
+}
 
 function render(){document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));document.getElementById('screen').innerHTML=({start,letters,rules:reading,phrases,grammar,dialogues:dialoguePage,review,quiz,practice,backup})[tab]();updateProgress()}
 document.addEventListener('click',e=>{const t=e.target.closest('button,[data-goto],[data-category]');if(!t)return;if(t.dataset.tab){setTab(t.dataset.tab);return}if(t.dataset.grammar!==undefined){grammarIndex=Number(t.dataset.grammar);setTab('grammar');return}if(t.dataset.dialogue!==undefined){dialogueIndex=Number(t.dataset.dialogue);setTab('dialogues');return}if(t.dataset.grdone){if(!stored.grammarDone.includes(t.dataset.grdone))stored.grammarDone.push(t.dataset.grdone);save();render();return}if(t.dataset.didone){if(!stored.dialogueDone.includes(t.dataset.didone))stored.dialogueDone.push(t.dataset.didone);save();render();return}if(t.dataset.mode){practiceMode=t.dataset.mode;reviewIndex=0;reviewRevealed=false;render();return}if(t.dataset.flip){reviewRevealed=!reviewRevealed;render();return}if(t.dataset.rnext){reviewIndex++;reviewRevealed=false;render();return}if(t.dataset.rating){const c=reviewCards()[reviewIndex];if(c){stored.stats.answered++;if(t.dataset.rating==='know'){stored.stats.correct++;stored.mistakes=stored.mistakes.filter(x=>x!==c.id)}else if(!stored.mistakes.includes(c.id))stored.mistakes.push(c.id);save()}if(practiceMode==='mistakes')reviewIndex=0;else reviewIndex++;reviewRevealed=false;render();return}if(t.dataset.dialogueplay){speakSequence(dialogues[dialogueIndex].lines);return}if(t.dataset.toggledialogue){dialogueReveal=!dialogueReveal;render();return}if(t.dataset.poption!==undefined){if(practiceSelected!==null)return;practiceSelected=Number(t.dataset.poption);stored.stats.answered++;if(practiceSelected===practiceQuestions[practiceIndex].right)stored.stats.correct++;save();render();return}if(t.dataset.pnext){practiceIndex=(practiceIndex+1)%practiceQuestions.length;practiceSelected=null;render();return}if(t.dataset.export){downloadBackup();return}if(t.dataset.import){document.getElementById('backupInput').click();return}if(t.dataset.resume){category=stored.last.category||'hello';setTab(stored.last.tab==='backup'?'start':stored.last.tab||'start');return}if(t.dataset.goto){setTab(t.dataset.goto);return}if(t.dataset.category){category=t.dataset.category;query='';setTab('phrases');return}if(t.dataset.say){speak(t.dataset.say,t);return}if(t.dataset.done){complete(t.dataset.done);return}if(t.dataset.favorite){const k=t.dataset.favorite;if(stored.favorites.includes(k))stored.favorites=stored.favorites.filter(x=>x!==k);else stored.favorites.push(k);save();render();return}if(t.dataset.option!==undefined){if(selected!==null)return;selected=Number(t.dataset.option);if(selected===quizzes[quizIndex].right)score++;render();return}if(t.hasAttribute('data-next')){if(quizIndex===quizzes.length-1)finished=true;else quizIndex++;selected=null;render();return}if(t.hasAttribute('data-restart')){quizIndex=0;score=0;selected=null;finished=false;render()}});
-document.addEventListener('input',e=>{if(e.target.id==='search'){const pos=e.target.selectionStart;query=e.target.value;render();const n=document.getElementById('search');n.focus();n.setSelectionRange(pos,pos)}});document.addEventListener('change',e=>{if(e.target.id==='translations'){showTranslations=e.target.checked;render()}if(e.target.id==='backupInput'){importBackup(e.target.files[0]);e.target.value=''}});if(stored.last&&stored.last.category)category=stored.last.category;render();
+document.addEventListener('input',e=>{if(e.target.id==='search'){const pos=e.target.selectionStart;query=e.target.value;render();const n=document.getElementById('search');n.focus();n.setSelectionRange(pos,pos)}});document.addEventListener('change',e=>{if(e.target.id==='translations'){showTranslations=e.target.checked;render()}if(e.target.id==='backupInput'){importBackup(e.target.files[0]);e.target.value=''}});if('speechSynthesis' in window){window.speechSynthesis.getVoices();window.speechSynthesis.addEventListener?.('voiceschanged',()=>window.speechSynthesis.getVoices())}if(stored.last&&stored.last.category)category=stored.last.category;render();
 </script></body></html>
